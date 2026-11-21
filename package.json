@@ -1,0 +1,21 @@
+{
+  "name": "jev-router-for-pi",
+  "version": "0.1.0",
+  "description": "Tiered virtual model router for the Pi coding agent: one classifier score per session, cheap tier for compaction and subagents, quota-aware downgrade.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-extension", "router", "llm-routing"],
+  "pi": {
+    "extensions": ["./src/auto-router.ts"]
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
