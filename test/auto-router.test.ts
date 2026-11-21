@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -61,20 +61,44 @@ function userRequest(extra: Record<string, unknown> = {}) {
   };
 }
 
-// The extension reads the module-level config at load. Point AUTO_ROUTER_CONFIG at a
-// fixture first, then reload the module in tests that need a custom config.
-let caseNo = 0;
-
-async function routeWith(cfg: Config, request: any, ctx: ReturnType<typeof registry>) {
+async function routeWith(cfg: Config, request: any, ctx: ReturnType<typeof registry>, id = cfg.id) {
   const dir = mkdtempSync(join(tmpdir(), "auto-router-test-"));
   const file = join(dir, "auto-router.json");
-  writeFileSync(file, JSON.stringify({ ...cfg, classifier: cfg.classifier }));
-  process.env.AUTO_ROUTER_CONFIG = file;
-  const module = await import(`../src/auto-router.ts?case=${++caseNo}`);
-  let virtual: any;
-  module.default({ registerVirtualModel: (definition: unknown) => (virtual = definition), on: () => {} });
-  return await virtual.route(request, { modelRegistry: ctx });
+  const previous = process.env.AUTO_ROUTER_CONFIG;
+  const models = new Map<string, any>();
+  try {
+    writeFileSync(file, JSON.stringify(cfg));
+    process.env.AUTO_ROUTER_CONFIG = file;
+    autoRouter({ registerVirtualModel: (definition: any) => models.set(definition.id, definition), on: () => {} } as never);
+    return await models.get(id).route(request, { modelRegistry: ctx });
+  } finally {
+    if (previous === undefined) delete process.env.AUTO_ROUTER_CONFIG;
+    else process.env.AUTO_ROUTER_CONFIG = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
+
+test("router/subagent defaults to the last configured tier and never classifies", async () => {
+  const cfg = config({ tiers: [...TIERS, { provider: "p", id: "last", thinking: "minimal" }], classifier: DEFAULTS.classifier });
+  const ctx = registry();
+  for (const reason of ["user", "continuation", "retry", "direct"]) {
+    const result = await routeWith(cfg, userRequest({ reason, previous: { model: TIERS[0] } }), ctx, "subagent");
+    assert.equal(result.model.id, "last");
+    assert.equal(result.thinkingLevel, "minimal");
+    assert.equal(result.state, undefined);
+  }
+  assert.equal(ctx.calls.length, 0);
+});
+
+test("router/subagent uses the explicit tier and its thinking level", async () => {
+  const result = await routeWith(config({ subagentTier: 1, compactTier: 2 }), userRequest(), registry(), "subagent");
+  assert.equal(result.model.id, "middle");
+  assert.equal(result.thinkingLevel, "high");
+});
+
+test("the main router cannot shadow the stable subagent alias", () => {
+  assert.equal(normalizeConfig({ provider: "router", id: "subagent" }).id, "auto");
+});
 
 test("defaults are strongest first and every index is reachable", () => {
   assert.equal(DEFAULTS.tiers.length, 3);

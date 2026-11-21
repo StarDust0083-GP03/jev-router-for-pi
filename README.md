@@ -38,7 +38,7 @@ pi --model router/auto
 | 同一回合的工具续写（`continuation`） | 上一轮应答的档位 | 保留 prompt cache 与 thinking 签名 |
 | 自动重试（`retry`） | 上次失败档位；是配额错误就降一档 | 用价格换可用性，并把 floor 顶到下不去 |
 | compact / 扩展调用（`direct`） | `compactTier` | 摘要是纯机械活，没必要用强模型 |
-| 子进程子会话 | `subagentTier` | 由 `subagentEnv` 标记（默认 `PI_SUBAGENT_CHILD`） |
+| 子代理（`router/subagent`） | `subagentTier`，未配置则取最后一档 | 不调用 Jev；不需要检测子进程 |
 
 分类器失败、超时、模型不在目录里时，回退到**会话当前选的 thinking 等级**映射的档位（`levelTiers`），不阻塞请求。
 
@@ -56,7 +56,7 @@ pi --model router/auto
   ],
   "levelTiers": { "xhigh": 0, "max": 0, "high": 1, "medium": 1, "low": 2, "minimal": 2, "off": 2 },
   "defaultLevelTier": 1,
-  "subagentTier": 2,
+  "subagentTier": 2, // 可省略，默认取最后一档
   "compactTier": 2,
   "debug": false
 }
@@ -100,41 +100,21 @@ Pi 把路由状态存在会话分支里，重启、fork、`/tree` 都会带回�
 
 ---
 
-## 子代理：为什么配置里写了也不生效
+## 子代理：用 `router/subagent`，只在一处配置物理模型
 
-`PI_SUBAGENT_CHILD` 只对**独立进程**的子会话有效。`pi-subagents`（0.26.2）是在同一进程里 `createAgentSession()` 起子会话的，既不设置这个环境变量，也不读 `settings.json` 里的 `subagents.defaultModel` / `defaultThinking`——pi 1.6.0 的设置里也根本没有 `subagents` 这一项。所以那两个键是摆设。
+`router/subagent` 直接使用 `tiers[subagentTier]` 的模型和 `thinking`；省略 `subagentTier` 就用最后一档。它不跑 Jev，也不继承主会话选的模型。`pi-subagents`（0.26.2）在同一进程里创建子会话，不设置 `PI_SUBAGENT_CHILD`，也不读 `settings.json` 的 `subagents.defaultModel` / `defaultThinking`，所以这里用显式别名，不检测运行环境。
 
-子会话的真实优先级是：**调用时 `model:` > agent 文件 frontmatter > 父会话模型**。也就是说，父会话用 `router/auto` 时，子会话继承的也是 `router/auto`，然后**自己再判一次档**——这才是子代理费用的实际走向。
-
-要让它便宜，唯一稳的地方是 agent 文件的 frontmatter：
-
-```markdown
----
-name: Explore
-description: ...
-model: commandcode/deepseek/deepseek-v4.1-flash
-thinking: off
-tools: read,bash,grep,find,ls
-prompt_mode: replace
----
-```
-
-注意同名 agent 文件是**整个替换**内置定义，不是合并。只写三行 frontmatter 会把内置的只读提示、工具白名单、以及 `general-purpose` 的 `allowed_subagents: all` 一起丢掉——那会让 `Explore` 拿到写权限、或者让 `general-purpose` 再也不能嵌套派活。
-
-所以别手抄。`scripts/pin-subagents.mjs` 从已安装的 pi-subagents 里读出内置定义原文，原样复制并只加 `model`/`thinking` 两行：
+先确认别名已注册，再修改 agent 文件。否则 `pi-subagents` 可能静默回退到父会话模型。
 
 ```bash
-node scripts/pin-subagents.mjs commandcode/deepseek/deepseek-v4.1-flash
-# 只钉部分类型：--agents Explore,Plan
-# 换个 thinking 等级：--thinking high
-# 先看产物：--out /tmp/agents
+pi --offline --list-models router/subagent
+# 在仓库目录下运行，为尚未自定义的内置类型生成定义：
+node scripts/pin-subagents.mjs
 ```
 
-它写 `~/.pi/agent/agents/{general-purpose,Explore,Plan}.md`，已有文件内容相同就不动。**升级 pi-subagents 后重跑一次**，否则内置提示词更新不到你这份副本里。
+脚本为 `general-purpose`、`Explore`、`Plan` 生成完整定义，不覆盖任何已有文件。已有定义只需把 frontmatter 的 `model:` 改为 `router/subagent`，可移除冗余的 `thinking:`；不要重建文件，同名文件会整体替换内置提示和工具配置。修改后 `/reload` 或开新会话。以后换低档，只改 `auto-router.json`。
 
-`Agent` 工具调用的 `model` 参数优先级最高（`agent-runner.ts` 里 `options.model ??`），适合一次性把重活交给强模型；但注意它对**所有**子代理都生效，包括你以为被钉住的那些。
-
-读不到上面这些，就记住一句：**子代理便宜不便宜，看 agent 文件，不看路由器配置。**
+在 `pi-subagents` 0.26.2 中，普通 `Agent` 调用的 frontmatter 优先于调用参数；Workflow 显式指定 `model` 时可以覆盖。已保存的子会话恢复时通常沿用原模型。仅对显式选择 `router/subagent` 的 agent 生效；其他自定义类型不受影响。
 
 ## 已知边界
 
@@ -147,7 +127,7 @@ node scripts/pin-subagents.mjs commandcode/deepseek/deepseek-v4.1-flash
 ## 验证
 
 ```bash
-npm test        # 25 条，node --test，无需安装依赖
+npm test        # node --test，无需安装依赖
 ```
 
 覆盖：配置加载/校验、`score → 档位`、`level → 档位`、配额降级与 floor 单调、floor 对续写的约束（回归）、状态不重复写、配置签名失效后重新判定、分类超时与失败重取、子进程识别、缺失模型的报错。
@@ -163,8 +143,8 @@ npm test        # 25 条，node --test，无需安装依赖
 ```
 src/auto-router.ts          扩展本体（虚拟模型 + 路由逻辑）
 auto-router.example.json    全量配置示例
-scripts/pin-subagents.mjs   给 pi-subagents 内置 agent 钉模型（复制原定义 + 两行）
-test/auto-router.test.ts    25 条单测
+scripts/pin-subagents.mjs   为内置 agent 生成档位别名配置，不覆盖已有文件
+test/auto-router.test.ts    路由和配置单测
 ```
 
 ## License

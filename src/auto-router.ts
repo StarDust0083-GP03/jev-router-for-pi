@@ -10,8 +10,8 @@
  *   - Follow-ups inside a turn stay on the model that answered.
  *   - Out-of-loop requests (compaction summaries, extension calls) use the cheap
  *     tier.
- *   - Subagent child processes (`subagentEnv`) start on the cheap tier and skip
- *     the classifier.
+ *   - `router/subagent` uses the configured subagent tier without classification.
+ *     Subprocess launchers can also mark `router/auto` via `subagentEnv`.
  *   - A failed request that Pi retries after a quota / rate-limit error drops
  *     one tier and raises a session floor; no path routes above that floor.
  *
@@ -67,8 +67,8 @@ export interface Config {
   levelTiers: Partial<Record<ThinkingLevel, number>>;
   /** Tier for a level that is not listed. */
   defaultLevelTier: number;
-  /** Tier for subagent child sessions. */
-  subagentTier: number;
+  /** Tier for subagents (default: last tier). */
+  subagentTier?: number;
   /** Tier for out-of-loop requests such as compaction summaries. */
   compactTier: number;
   /** Environment variables that mark a subagent child process. */
@@ -112,7 +112,6 @@ export const DEFAULTS: Config = {
   ],
   levelTiers: { xhigh: 0, max: 0, high: 1, medium: 1, low: 2, minimal: 2, off: 2 },
   defaultLevelTier: 1,
-  subagentTier: 2,
   compactTier: 2,
   subagentEnv: ["PI_SUBAGENT_CHILD"],
   debug: false,
@@ -196,6 +195,11 @@ export function normalizeConfig(raw: unknown, warn: (message: string) => void = 
     }
   }
 
+  if (cfg.provider === "router" && cfg.id === "subagent") {
+    warn("router/subagent is reserved; using router/auto for the main router");
+    cfg.id = DEFAULTS.id;
+  }
+
   if ("thinkingLevels" in raw) {
     const levels = Array.isArray(raw.thinkingLevels) ? raw.thinkingLevels.filter(isThinkingLevel) : [];
     if (levels.length > 0) cfg.thinkingLevels = [...new Set(levels)];
@@ -258,7 +262,7 @@ export function normalizeConfig(raw: unknown, warn: (message: string) => void = 
     if (!(key in raw)) continue;
     const value = raw[key];
     if (typeof value === "number" && Number.isFinite(value)) cfg[key] = clampTier(value, cfg.tiers.length);
-    else warn(`${key} must be a number; keeping ${DEFAULTS[key]}`);
+    else warn(`${key} must be a number; keeping ${DEFAULTS[key] ?? "the last tier"}`);
   }
 
   if ("subagentEnv" in raw) {
@@ -388,10 +392,19 @@ export async function classifyTier(
   }
 }
 
-/**
- * Resolve a tier to a physical model. The floor is applied here and nowhere
- * else, so every request path (user, continuation, retry, direct) obeys it.
- */
+function resolveTier(ctx: Pick<ExtensionContext, "modelRegistry">, cfg: Config, index: number) {
+  const { provider, id, thinking } = cfg.tiers[index];
+  const model = ctx.modelRegistry.find(provider, id);
+  if (!model) {
+    throw new Error(
+      `auto-router: ${provider}/${id} (tier ${index}) is not in the catalog. ` +
+        `Fix the tier in ${configPath()}, or check that provider's credentials.`,
+    );
+  }
+  return { model, thinkingLevel: thinking };
+}
+
+/** Resolve a session route after applying the floor. */
 export function pick(
   ctx: Pick<ExtensionContext, "modelRegistry">,
   cfg: Config,
@@ -402,21 +415,22 @@ export function pick(
   previous: State | undefined,
 ): ModelRoute<State> {
   const index = clampTier(Math.max(tier, floor), cfg.tiers.length);
-  const { provider, id, thinking } = cfg.tiers[index];
-  const model = ctx.modelRegistry.find(provider, id);
-  if (!model) {
-    throw new Error(
-      `auto-router: ${provider}/${id} (tier ${index}) is not in the catalog. ` +
-        `Fix the tier in ${configPath()}, or check that provider's credentials.`,
-    );
-  }
   const next: State = { tier: index, floor: clampTier(floor, cfg.tiers.length), decided, sig };
   // Pi appends a state entry whenever route() returns a new object; stay quiet when nothing moved.
-  return { model, thinkingLevel: thinking, state: sameState(previous, next) ? undefined : next };
+  return { ...resolveTier(ctx, cfg, index), state: sameState(previous, next) ? undefined : next };
 }
 
 function register(pi: ExtensionAPI, cfg: Config): void {
   const sig = configSignature(cfg);
+  const subagentTier = cfg.subagentTier ?? cfg.tiers.length - 1;
+  pi.registerVirtualModel({
+    provider: "router",
+    id: "subagent",
+    name: "Subagent tier",
+    route(_request, ctx) {
+      return resolveTier(ctx, cfg, subagentTier);
+    },
+  });
   pi.registerVirtualModel<State>({
     provider: cfg.provider,
     id: cfg.id,
@@ -427,8 +441,8 @@ function register(pi: ExtensionAPI, cfg: Config): void {
     async route(request, ctx) {
       const subagent = isSubagentSession(cfg);
       const fresh: State = {
-        tier: subagent ? cfg.subagentTier : cfg.defaultLevelTier,
-        floor: subagent ? cfg.subagentTier : 0,
+        tier: subagent ? subagentTier : cfg.defaultLevelTier,
+        floor: subagent ? subagentTier : 0,
         decided: subagent,
         sig,
       };
