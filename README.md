@@ -114,12 +114,25 @@ name: Explore
 description: ...
 model: commandcode/deepseek/deepseek-v4.1-flash
 thinking: off
+tools: read,bash,grep,find,ls
+prompt_mode: replace
 ---
 ```
 
-注意同名 agent 文件是**整个替换**内置定义，不是合并；只写三行 frontmatter 会把内置的只读提示和工具限制一起丢掉。做法是把 `~/.pi/agent/npm/node_modules/@tintinweb/pi-subagents/src/default-agents.ts` 里对应 agent 的完整定义复制成 `~/.pi/agent/agents/Explore.md`，再加 `model`/`thinking` 两行。
+注意同名 agent 文件是**整个替换**内置定义，不是合并。只写三行 frontmatter 会把内置的只读提示、工具白名单、以及 `general-purpose` 的 `allowed_subagents: all` 一起丢掉——那会让 `Explore` 拿到写权限、或者让 `general-purpose` 再也不能嵌套派活。
 
-`Agent` 工具调用的 `model` 参数也能临时指定，优先级最高，适合一次性任务。
+所以别手抄。`scripts/pin-subagents.mjs` 从已安装的 pi-subagents 里读出内置定义原文，原样复制并只加 `model`/`thinking` 两行：
+
+```bash
+node scripts/pin-subagents.mjs commandcode/deepseek/deepseek-v4.1-flash
+# 只钉部分类型：--agents Explore,Plan
+# 换个 thinking 等级：--thinking high
+# 先看产物：--out /tmp/agents
+```
+
+它写 `~/.pi/agent/agents/{general-purpose,Explore,Plan}.md`，已有文件内容相同就不动。**升级 pi-subagents 后重跑一次**，否则内置提示词更新不到你这份副本里。
+
+`Agent` 工具调用的 `model` 参数优先级最高（`agent-runner.ts` 里 `options.model ??`），适合一次性把重活交给强模型；但注意它对**所有**子代理都生效，包括你以为被钉住的那些。
 
 读不到上面这些，就记住一句：**子代理便宜不便宜，看 agent 文件，不看路由器配置。**
 
@@ -148,9 +161,10 @@ npm test        # 25 条，node --test，无需安装依赖
 ## 文件
 
 ```
-src/auto-router.ts       扩展本体（虚拟模型 + 路由逻辑）
-auto-router.example.json 全量配置示例
-test/auto-router.test.ts 25 条单测
+src/auto-router.ts          扩展本体（虚拟模型 + 路由逻辑）
+auto-router.example.json    全量配置示例
+scripts/pin-subagents.mjs   给 pi-subagents 内置 agent 钉模型（复制原定义 + 两行）
+test/auto-router.test.ts    25 条单测
 ```
 
 ## License
